@@ -31,6 +31,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.EmojiEvents
@@ -87,6 +88,8 @@ fun InsightsScreen(
     // and makes "Done" return instead of toggling edit mode in place.
     onBack: (() -> Unit)? = null,
     onOpenAchievements: () -> Unit = {},
+    // Tappable Overview tiles (longest/shortest duration) open the encounter that set the figure.
+    onOpenEncounter: (String) -> Unit = {},
     viewModel: InsightsViewModel = hiltViewModel(),
 ) {
     val insights by viewModel.insights.collectAsStateWithLifecycle()
@@ -162,6 +165,7 @@ fun InsightsScreen(
                     hiddenSections = hiddenSections,
                     sectionStyles = sectionStyles,
                     onOpenAchievements = onOpenAchievements,
+                    onOpenEncounter = onOpenEncounter,
                     viewModel = viewModel,
                 )
             }
@@ -215,6 +219,7 @@ private fun InsightsList(
     hiddenSections: Set<String>,
     sectionStyles: Map<String, ChartStyle>,
     onOpenAchievements: () -> Unit,
+    onOpenEncounter: (String) -> Unit,
     viewModel: InsightsViewModel,
 ) {
     LazyColumn(
@@ -258,7 +263,13 @@ private fun InsightsList(
             items(sections, key = { it.id }) { section ->
                 Box(Modifier.animateItem()) {
                     when {
-                        section.id == InsightSections.OVERVIEW -> OverviewGrid(insights, statOrder, hiddenStats)
+                        // In edit mode the grid is a reorder surface, so taps must not navigate.
+                        section.id == InsightSections.OVERVIEW -> OverviewGrid(
+                            insights = insights,
+                            order = statOrder,
+                            hidden = hiddenStats,
+                            onOpenEncounter = if (editMode) null else onOpenEncounter,
+                        )
                         // Self-contained summary card (its own header + ViewModel), not a chart section.
                         // It reads the full log, so say so plainly while a scope is active.
                         section.id == InsightSections.ACHIEVEMENTS -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -306,9 +317,19 @@ private fun CenteredNote(text: String) {
 
 private const val STAT_COLUMNS = 3
 
-/** A uniform, evenly-sized grid (fixed columns, equal-height cells) so the tiles line up cleanly. */
+/**
+ * A uniform, evenly-sized grid (fixed columns, equal-height cells) so the tiles line up cleanly.
+ * [onOpenEncounter] is invoked with the encounter id a tile drills into; tiles without a target
+ * render read-only. Passing null (edit mode) makes every tile non-clickable, because there the
+ * grid's gestures belong to drag-to-reorder.
+ */
 @Composable
-private fun OverviewGrid(insights: Insights, order: List<String>, hidden: Set<String>) {
+private fun OverviewGrid(
+    insights: Insights,
+    order: List<String>,
+    hidden: Set<String>,
+    onOpenEncounter: ((String) -> Unit)? = null,
+) {
     val tiles = StatTiles.ordered(order)
         .filter { it.id !in hidden }
         .mapNotNull { tile -> tile.value(insights)?.let { tile to it } }
@@ -319,7 +340,20 @@ private fun OverviewGrid(insights: Insights, order: List<String>, hidden: Set<St
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                rowTiles.forEach { (tile, value) -> StatCard(tile.label, value, Modifier.weight(1f)) }
+                rowTiles.forEach { (tile, value) ->
+                    val target = tile.target(insights)
+                    StatCard(
+                        label = tile.label,
+                        value = value,
+                        modifier = Modifier.weight(1f),
+                        onClick = when {
+                            target == null || onOpenEncounter == null -> null
+                            else -> {
+                                { onOpenEncounter(target) }
+                            }
+                        },
+                    )
+                }
                 repeat(STAT_COLUMNS - rowTiles.size) { Box(Modifier.weight(1f)) }
             }
         }
@@ -327,10 +361,25 @@ private fun OverviewGrid(insights: Insights, order: List<String>, hidden: Set<St
 }
 
 @Composable
-private fun StatCard(label: String, value: String, modifier: Modifier = Modifier) {
+private fun StatCard(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+) {
     Surface(
-        color = MaterialTheme.colorScheme.primaryContainer,
-        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        onClick = onClick ?: {},
+        enabled = onClick != null,
+        color = if (onClick != null) {
+            MaterialTheme.colorScheme.secondaryContainer
+        } else {
+            MaterialTheme.colorScheme.primaryContainer
+        },
+        contentColor = if (onClick != null) {
+            MaterialTheme.colorScheme.onSecondaryContainer
+        } else {
+            MaterialTheme.colorScheme.onPrimaryContainer
+        },
         shape = MaterialTheme.shapes.large,
         // Min (not fixed) height so the tile grows rather than clipping at large font scales.
         modifier = modifier.heightIn(min = 92.dp),
@@ -340,7 +389,19 @@ private fun StatCard(label: String, value: String, modifier: Modifier = Modifier
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                // A chevron is the conventional "this opens something" cue; without it a tappable
+                // tile is indistinguishable from a read-only one.
+                if (onClick != null) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowForwardIos,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f),
+                        modifier = Modifier.padding(start = 4.dp).size(10.dp),
+                    )
+                }
+            }
         }
     }
 }

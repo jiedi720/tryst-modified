@@ -26,6 +26,84 @@ Inspired by other tracking apps you need to pay for, and built so privacy is the
 
 </div>
 
+## Changes in this fork
+
+Everything below is **on top of** upstream [`herbiewalker/tryst`](https://github.com/herbiewalker/tryst)
+v0.6.0 — the rest of this README describes the original app. Upstream's
+[zero-network promise](#why-tryst) is preserved: still no `INTERNET` permission, and the
+`CheckNoNetworkPermissionTask` build guard is untouched.
+
+### Fixed
+
+**Backups could not be imported — and the error message hid why.**
+Any restore failed, including one exported moments earlier, while the UI always claimed
+"wrong password or not a Tryst backup". Two causes: `BackupViewModel.import` discarded
+`e.message`, so a locked session or a truncated file was indistinguishable from a bad password
+(the `export` path already reported it — an oversight, not a design choice); and
+`suppressNextAutoLock` is consumed by the *first* backgrounding, which is the file picker, so
+looking the backup password up in another app locked the session and the restore then died on
+`Database accessed while locked`. The import now reports what actually went wrong, and the
+suppression is re-armed after the picker returns.
+
+*The crypto was ruled out by direct experiment*: a Tink 1.15.0 round-trip over the real container
+— header layout, multi-segment payloads (1/3/8 MiB across the 1 MiB segment boundary), the
+iteration-count bounds — all pass, `BackupManager.TABLES` matches Room schema v16 exactly, and the
+repo's own `samples/tryst-test-dataset.tryst` decrypts (113 media blobs).
+
+**Insights bar charts ignored their values.**
+`VerticalBarChart` sized bars with `Modifier.weight(fraction)`, but `weight` is a *flex
+distribution*, not a scaled length: it splits whatever space is left after the fixed-height
+children (38 dp of labels and spacers) and shares it across every bar. With 12 monthly buckets the
+tallest bar reached 14% of the track; on the heavily skewed rating histogram it computed to 454%.
+The bars were squashed into a stub row. Now a fixed 96 dp track with `fillMaxHeight(fraction)` —
+the same shape `RankedBars` already used correctly — and the value labels moved *inside* the track
+so each number rides its own bar top instead of lining up on one horizontal line.
+
+### Added
+
+**Longest / Shortest duration tiles** on the Insights overview, after *Avg duration*, which navigate
+straight to the encounter holding that extreme. Ties resolve to the more recent record. Backed by
+5 new unit tests, including one asserting a scoped window never reports an encounter outside it.
+
+**A preset export password**, so exporting no longer prompts every time. It is encrypted with a
+**dedicated** Android Keystore key (AES-256-GCM, non-exportable) — deliberately *not* the vault's
+KEK, because the preset must stay readable while the app is locked and the two secrets should not
+share a lifetime. If the keystore refuses, the password simply isn't stored rather than falling
+back to plaintext; if it later becomes unreadable (device keystore reset), it is cleared and the
+prompt returns. The import path deliberately offers no "remember" — a password you only need to
+*read* a backup is not worth storing. Editing the field never shows the stored value.
+
+**A default export folder.** Pick it once via SAF; OneDrive and other providers appear as folder
+choices and sync the file themselves, so no network permission is needed. The import picker now
+**opens in that folder** too, since that is where the backups are. Filenames carry a
+minute-resolution timestamp, because the one-tap export path has no save dialog to rename in and a
+date-only name would silently overwrite the same day's earlier backup.
+
+### Known issues left alone
+
+Two upstream problems are documented rather than fixed, as both need a decision first:
+
+- **Insights axis labels mix languages.** `monthLabel()` and `DayOfWeek.getDisplayName()` follow
+  `Locale.getDefault()`, so on a Chinese system they read `1月` / `周一` while every tile label,
+  category name (`"Anonymous"`, `"Solo"`) and section heading stays hardcoded English — the project
+  ships no `values-zh`. Beyond looking wrong, it puts those axis labels outside `strings.xml`, so
+  they cannot be localized at all. Either pin them to `Locale.ENGLISH` (consistent with the rest,
+  small change) or move them into resources and add a proper translation (correct, larger).
+  This is also why `InsightsEngineTest`'s two English-label assertions fail on a Chinese system —
+  run tests with `-Duser.language=en`.
+- **`samples/tryst-sample-backup.tryst` does not open** with the password its own
+  `tools/dataset/README.md` documents (`Tryst-Test-2026`), while `tryst-test-dataset.tryst` does.
+  The header is valid and the size is plausible, so the file itself disagrees with the docs.
+
+### Repository note
+
+Upstream commits `archive/v0.6.0/mapping.txt` (52 MB of R8 output from their release build). It is
+kept here, since it is part of the inherited history — but note it describes a build of the
+*upstream* code, so it does not match any APK produced from this tree. See
+[archive/README.md](archive/README.md).
+
+Full detail, including the reasoning behind each fix: [FORK-NOTES.md](FORK-NOTES.md).
+
 ## Why Tryst
 
 Privacy isn't a setting here — it's the architecture.

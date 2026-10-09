@@ -21,6 +21,10 @@ import java.util.Locale
  * apply yet (e.g. no rating recorded) — null tiles are skipped in view mode. Ids are stable and
  * persisted (order + hidden set), so don't rename them.
  *
+ * [target] is the encounter this tile drills into when tapped, or null for a plain figure. Only a
+ * handful of tiles are tappable; the rest are read-only summaries. A tile whose [target] resolves
+ * to null is rendered as read-only rather than as a dead tap target.
+ *
  * A few tiles are "as of today" by nature and return null while a time scope is active (INS-2):
  * *This month* / *This year* would count against the real calendar rather than the window, and
  * *Current streak* / *Days since last* describe a moment that has already passed. Rather than
@@ -29,6 +33,8 @@ import java.util.Locale
 data class StatTile(
     val id: String,
     val label: String,
+    /** Encounter id to open when tapped, or null when the tile isn't a link. */
+    val target: (Insights) -> String? = { null },
     val value: (Insights) -> String?,
 )
 
@@ -48,6 +54,20 @@ object StatTiles {
         StatTile("streak_longest", "Longest streak") { weeks(it.longestStreakWeeks) },
         StatTile("avg_rating", "Avg rating") { i -> i.avgRating?.let { "★ ${decimal(it)}" } },
         StatTile("avg_duration", "Avg duration") { i -> i.avgDurationMin?.let { "${it.toInt()} min" } },
+        // Tap-through to the record that set each extreme. Placed right after Avg duration because
+        // that's the figure they read as context for.
+        StatTile(
+            id = "longest_duration",
+            label = "Longest",
+            value = { i -> i.longestDuration?.let { duration(it.minutes) } },
+            target = { i -> i.longestDuration?.encounterId },
+        ),
+        StatTile(
+            id = "shortest_duration",
+            label = "Shortest",
+            value = { i -> i.shortestDuration?.let { duration(it.minutes) } },
+            target = { i -> i.shortestDuration?.encounterId },
+        ),
         StatTile("total_time", "Total time") { i -> i.totalDurationMin.takeIf { it > 0 }?.let(::duration) },
         StatTile("orgasms_self", "Your orgasms") { i -> i.totalSelfOrgasms.takeIf { it > 0 }?.toString() },
         StatTile("orgasms_partner", "Partner orgasms") { i -> i.totalPartnerOrgasms.takeIf { it > 0 }?.toString() },

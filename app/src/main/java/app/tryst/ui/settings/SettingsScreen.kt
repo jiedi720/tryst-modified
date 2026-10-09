@@ -34,8 +34,11 @@ import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderOff
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.Password
@@ -78,7 +81,6 @@ import app.tryst.ui.common.rememberHaptics
 import app.tryst.ui.lock.BiometricPromptHelper
 import app.tryst.ui.lock.LockViewModel
 import app.tryst.ui.lock.findFragmentActivity
-import java.time.LocalDate
 
 // Auto-lock delay options (ms). 0 = lock immediately on background (default, strongest privacy).
 private const val AUTO_LOCK_30S = 30_000L
@@ -120,6 +122,18 @@ private fun SettingsRow(
             }
         }
     }
+}
+
+/**
+ * Default name for a new backup file. The time is included because the one-tap export path writes
+ * straight into a remembered folder with no save dialog to let the user rename or confirm: a
+ * date-only name would silently overwrite that same day's earlier backup on every export.
+ */
+private fun backupFileName(): String {
+    val now = java.time.LocalDateTime.now()
+    val d = "%04d-%02d-%02d".format(now.year, now.monthValue, now.dayOfMonth)
+    val t = "%02d%02d".format(now.hour, now.minute)
+    return "tryst-backup-$d-$t.tryst"
 }
 
 /** The toggle counterpart of [SettingsRow] — same row shape, a trailing [Switch] instead of an icon. */
@@ -178,19 +192,67 @@ fun SettingsScreen(
     val backupViewModel: BackupViewModel = hiltViewModel()
     var showExportPw by remember { mutableStateOf(false) }
     var showImportPw by remember { mutableStateOf(false) }
+    var showPresetPw by remember { mutableStateOf(false) }
     var pendingExportPassword by remember { mutableStateOf("") }
     var pendingExportIncludeSettings by remember { mutableStateOf(true) }
     var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
+    val hasPresetPassword by backupViewModel.hasPresetPassword.collectAsStateWithLifecycle()
+    val exportDirUri by backupViewModel.exportDirUri.collectAsStateWithLifecycle()
+
     val createBackup = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream"),
     ) { uri ->
         uri?.let { backupViewModel.export(it, pendingExportPassword, pendingExportIncludeSettings) }
         pendingExportPassword = ""
     }
-    val openBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+
+    // Picking a default folder grants a persistable tree permission; without taking it the URI would
+    // stop resolving after a process death and the next export would fail.
+    val pickExportDir = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
         if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }
+            backupViewModel.setExportDir(uri)
+        }
+    }
+
+    // Where an export should land. A remembered folder wins: build the name ourselves and write
+    // straight into the tree, skipping the system save dialog entirely. A SAF tree grant covers
+    // every child document, so a name we generate is always writable inside it.
+    fun startExport(password: String, includeSettings: Boolean) {
+        val dir = exportDirUri
+        if (dir == null) {
+            pendingExportPassword = password
+            pendingExportIncludeSettings = includeSettings
+            createBackup.launch(backupFileName())
+        } else {
+            backupViewModel.exportInFolder(dir, backupFileName(), password, includeSettings)
+        }
+    }
+    // Built by hand rather than via ActivityResultContracts.OpenDocument so we can seed
+    // EXTRA_INITIAL_URI — the contract's launch(Array<String>) overload gives no way to say where
+    // the picker should open. Backups live in the folder the user exports to, so starting the
+    // picker there saves hunting through Downloads. Providers that don't honour the extra simply
+    // open at their default location, which is the old behaviour.
+    val openBackup = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val uri = result.data?.data
+        if (uri != null && result.resultCode == android.app.Activity.RESULT_OK) {
             pendingImportUri = uri
             showImportPw = true
+            // The picker's own backgrounding already CONSUMED the one-shot suppression armed on
+            // tap (SessionManager clears the flag on first use). Re-arm it here so the password
+            // dialog is survivable: with the default 0 ms auto-lock, looking the password up in
+            // another app would otherwise lock the session and the restore would then die on
+            // "Database accessed while locked" — a failure the old message mislabelled as a
+            // wrong password.
+            backupViewModel.suppressAutoLock()
         }
     }
 
@@ -409,7 +471,39 @@ fun SettingsScreen(
                 icon = Icons.Filled.FileUpload,
                 title = stringResource(R.string.settings_export),
                 enabled = !backupViewModel.busy,
-                onClick = { showExportPw = true },
+                // With a preset password there's nothing to ask, so the first tap does the export.
+                // Otherwise fall through to the dialog as before.
+                onClick = {
+                    val preset = if (hasPresetPassword) backupViewModel.exportPassword() else null
+                    if (preset != null) startExport(preset, includeSettings = true) else showExportPw = true
+                },
+            )
+            SettingsRow(
+                icon = Icons.Filled.Folder,
+                title = stringResource(R.string.settings_export_folder),
+                description = exportDirUri?.let { stringResource(R.string.settings_export_folder_set) }
+                    ?: stringResource(R.string.settings_export_folder_unset),
+                enabled = !backupViewModel.busy,
+                onClick = { pickExportDir.launch(null) },
+            )
+            if (exportDirUri != null) {
+                SettingsRow(
+                    icon = Icons.Filled.FolderOff,
+                    title = stringResource(R.string.settings_export_folder_clear),
+                    enabled = !backupViewModel.busy,
+                    onClick = { backupViewModel.setExportDir(null) },
+                )
+            }
+            SettingsRow(
+                icon = Icons.Filled.Key,
+                title = stringResource(R.string.settings_export_pw_preset),
+                description = if (hasPresetPassword) {
+                    stringResource(R.string.settings_export_pw_preset_set)
+                } else {
+                    stringResource(R.string.settings_export_pw_preset_unset)
+                },
+                enabled = !backupViewModel.busy,
+                onClick = { showPresetPw = true },
             )
             SettingsRow(
                 icon = Icons.Filled.FileDownload,
@@ -418,7 +512,32 @@ fun SettingsScreen(
                 enabled = !backupViewModel.busy,
                 onClick = {
                     backupViewModel.suppressAutoLock()
-                    openBackup.launch(arrayOf("*/*"))
+                    // If no folder is set, or the provider rejects the intent outright, fall back to
+                    // a plain ACTION_OPEN_DOCUMENT with no seed.
+                    val intent = runCatching {
+                        android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT).apply {
+                            addCategory(android.content.Intent.CATEGORY_OPENABLE)
+                            // Accept any type: a .tryst file's MIME is provider-defined and often
+                            // octet-stream, so filtering would hide it in some pickers.
+                            type = "*/*"
+                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            // Open where the backups actually are. EXTRA_INITIAL_URI wants the
+                            // tree's *document* uri, not the tree uri we stored.
+                            exportDirUri?.let { dir ->
+                                val doc = android.provider.DocumentsContract.buildDocumentUriUsingTree(
+                                    dir,
+                                    android.provider.DocumentsContract.getTreeDocumentId(dir),
+                                )
+                                putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI, doc)
+                            }
+                        }
+                    }.getOrElse {
+                        android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT).apply {
+                            addCategory(android.content.Intent.CATEGORY_OPENABLE)
+                            type = "*/*"
+                        }
+                    }
+                    openBackup.launch(intent)
                 },
             )
             AnimatedVisibility(visible = backupViewModel.status != null) {
@@ -467,14 +586,72 @@ fun SettingsScreen(
             title = stringResource(R.string.settings_backup_pw_set_title),
             requireConfirm = true,
             includeSettingsInitial = true,
-            onConfirm = { pw, _, includeSettings ->
+            savePresetInitial = true,
+            onConfirm = { pw, _, includeSettings, savePreset ->
                 showExportPw = false
-                pendingExportPassword = pw
-                pendingExportIncludeSettings = includeSettings
+                if (savePreset) backupViewModel.setPresetPassword(pw)
                 backupViewModel.suppressAutoLock()
-                createBackup.launch("tryst-backup-${LocalDate.now()}.tryst")
+                startExport(pw, includeSettings)
             },
             onDismiss = { showExportPw = false },
+        )
+    }
+
+    if (showPresetPw) {
+        // Editing the preset: the field starts empty rather than pre-filled with the stored secret —
+        // showing it would put the password on screen (and in any screenshot the user takes).
+        var preset by remember { mutableStateOf("") }
+        var presetConfirm by remember { mutableStateOf("") }
+        val presetValid = preset.length >= 6 && preset == presetConfirm
+        AlertDialog(
+            onDismissRequest = { showPresetPw = false },
+            title = { Text(stringResource(R.string.settings_export_pw_preset)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        stringResource(R.string.settings_export_pw_preset_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = preset,
+                        onValueChange = { preset = it },
+                        label = { Text(stringResource(R.string.settings_password_label)) },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = presetConfirm,
+                        onValueChange = { presetConfirm = it },
+                        label = { Text(stringResource(R.string.settings_confirm_password_label)) },
+                        singleLine = true,
+                        isError = presetConfirm.isNotEmpty() && preset != presetConfirm,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        backupViewModel.setPresetPassword(preset)
+                        showPresetPw = false
+                    },
+                    enabled = presetValid,
+                ) { Text(stringResource(R.string.action_ok)) }
+            },
+            dismissButton = {
+                Row {
+                    if (hasPresetPassword) {
+                        TextButton(onClick = {
+                            backupViewModel.setPresetPassword(null)
+                            showPresetPw = false
+                        }) { Text(stringResource(R.string.settings_export_pw_preset_clear)) }
+                    }
+                    TextButton(onClick = { showPresetPw = false }) { Text(stringResource(R.string.action_cancel)) }
+                }
+            },
         )
     }
 
@@ -483,7 +660,7 @@ fun SettingsScreen(
             title = stringResource(R.string.settings_backup_pw_enter_title),
             requireConfirm = false,
             wipeFirstInitial = true,
-            onConfirm = { pw, wipeFirst, _ ->
+            onConfirm = { pw, wipeFirst, _, _ ->
                 showImportPw = false
                 pendingImportUri?.let { backupViewModel.import(it, pw, wipeFirst) }
                 pendingImportUri = null
@@ -501,18 +678,23 @@ fun SettingsScreen(
 private fun BackupPasswordDialog(
     title: String,
     requireConfirm: Boolean,
-    onConfirm: (password: String, wipeFirst: Boolean, includeSettings: Boolean) -> Unit,
+    onConfirm: (password: String, wipeFirst: Boolean, includeSettings: Boolean, savePreset: Boolean) -> Unit,
     onDismiss: () -> Unit,
     // Non-null on the import path (Bundle-E Q1): renders a wipe-first checkbox above the password
     // field so users can pick "replace" (default) vs "merge on top" semantics.
     wipeFirstInitial: Boolean? = null,
     // Non-null on the export path (QOL-5): renders an "include my settings" checkbox.
     includeSettingsInitial: Boolean? = null,
+    // Non-null on the export path: renders a "remember this password" checkbox so the next export
+    // can skip the prompt. Null on import — remembering a password you only need to READ a backup
+    // with would be storing a secret for no benefit.
+    savePresetInitial: Boolean? = null,
 ) {
     var password by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf("") }
     var wipeFirst by remember { mutableStateOf(wipeFirstInitial ?: false) }
     var includeSettings by remember { mutableStateOf(includeSettingsInitial ?: true) }
+    var savePreset by remember { mutableStateOf(savePresetInitial ?: false) }
     val mismatch = requireConfirm && confirm.isNotEmpty() && password != confirm
     val valid = password.length >= 6 && (!requireConfirm || password == confirm)
 
@@ -585,9 +767,34 @@ private fun BackupPasswordDialog(
                         color = if (mismatch) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                if (savePresetInitial != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .toggleable(value = savePreset, role = Role.Switch, onValueChange = { savePreset = it }),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Switch(checked = savePreset, onCheckedChange = null)
+                        Text(
+                            stringResource(R.string.settings_export_pw_remember),
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
+                    Text(
+                        stringResource(R.string.settings_export_pw_remember_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         },
-        confirmButton = { TextButton(onClick = { onConfirm(password, wipeFirst, includeSettings) }, enabled = valid) { Text(stringResource(R.string.action_ok)) } },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(password, wipeFirst, includeSettings, savePreset) },
+                enabled = valid,
+            ) { Text(stringResource(R.string.action_ok)) }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) } },
     )
 }

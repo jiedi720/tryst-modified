@@ -25,6 +25,7 @@ import java.time.LocalDate
 import java.time.ZoneOffset
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -112,6 +113,81 @@ class InsightsEngineTest {
         // ratings 3 and 5 each appear once
         assertEquals(1, r.ratingHistogram[2])
         assertEquals(1, r.ratingHistogram[4])
+    }
+
+    @Test
+    fun longestAndShortestDurationCarryTheirEncounter() {
+        val log = listOf(
+            encounter("mid", today, durationMin = 45),
+            encounter("longest", today.minusDays(1), durationMin = 130),
+            encounter("shortest", today.minusDays(2), durationMin = 12),
+            encounter("no-duration", today.minusDays(3)),
+        )
+        val r = InsightsEngine.compute(log, zone = zone, today = today)
+        assertEquals(130, r.longestDuration!!.minutes)
+        assertEquals("longest", r.longestDuration!!.encounterId)
+        assertEquals(12, r.shortestDuration!!.minutes)
+        assertEquals("shortest", r.shortestDuration!!.encounterId)
+    }
+
+    @Test
+    fun durationExtremesAreNullWhenNoneRecorded() {
+        val r = InsightsEngine.compute(
+            listOf(encounter("a", today), encounter("b", today.minusDays(1))),
+            zone = zone,
+            today = today,
+        )
+        assertNull(r.longestDuration)
+        assertNull(r.shortestDuration)
+        assertNull(r.avgDurationMin)
+    }
+
+    @Test
+    fun tiedDurationsResolveToTheMostRecentEncounter() {
+        // A tie is broken toward the newer record: when two encounters share the extreme, the one a
+        // user is likelier to want to open is the more recent. Asserted on both ends so the ordering
+        // can't silently invert.
+        val log = listOf(
+            encounter("older-max", today.minusDays(9), durationMin = 90),
+            encounter("newer-max", today.minusDays(2), durationMin = 90),
+            encounter("older-min", today.minusDays(8), durationMin = 10),
+            encounter("newer-min", today.minusDays(1), durationMin = 10),
+        )
+        val r = InsightsEngine.compute(log, zone = zone, today = today)
+        assertEquals(90, r.longestDuration!!.minutes)
+        assertEquals("newer-max", r.longestDuration!!.encounterId)
+        assertEquals(10, r.shortestDuration!!.minutes)
+        assertEquals("newer-min", r.shortestDuration!!.encounterId)
+    }
+
+    @Test
+    fun aSingleEncounterIsBothExtremes() {
+        val r = InsightsEngine.compute(
+            listOf(encounter("solo", today, durationMin = 20)),
+            zone = zone,
+            today = today,
+        )
+        assertEquals("solo", r.longestDuration!!.encounterId)
+        assertEquals("solo", r.shortestDuration!!.encounterId)
+    }
+
+    @Test
+    fun durationExtremesFollowTheActiveScope() {
+        // A long encounter outside the window must not be reported as the longest inside it.
+        val log = listOf(
+            encounter("out-of-scope-long", today.minusYears(1), durationMin = 600),
+            encounter("in-scope-a", today.minusDays(2), durationMin = 50),
+            encounter("in-scope-b", today.minusDays(1), durationMin = 70),
+        )
+        val scoped = InsightsEngine.compute(
+            log,
+            zone = zone,
+            today = today,
+            scope = DateRange(today.minusDays(7), today),
+        )
+        assertEquals(70, scoped.longestDuration!!.minutes)
+        assertEquals("in-scope-b", scoped.longestDuration!!.encounterId)
+        assertEquals(50, scoped.shortestDuration!!.minutes)
     }
 
     @Test

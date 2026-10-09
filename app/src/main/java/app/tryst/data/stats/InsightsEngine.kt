@@ -36,6 +36,17 @@ data class Tally(val label: String, val count: Int)
 data class Bucket(val label: String, val count: Int)
 
 /**
+ * One end of the duration range — the figure plus the encounter it belongs to, so a UI tile can
+ * navigate straight to the record that set it. Carries the date too, letting a tile label itself
+ * ("2h 10m · 3 Mar") without the screen having to look the encounter up again.
+ */
+data class DurationExtreme(
+    val minutes: Int,
+    val encounterId: String,
+    val date: LocalDate,
+)
+
+/**
  * Everything the Insights screen renders, precomputed from the encounter log. Pure data —
  * no Android/Compose types — so [InsightsEngine.compute] is unit-testable on the JVM.
  *
@@ -61,6 +72,10 @@ data class Insights(
     val ratingHistogram: List<Int>,
     val totalDurationMin: Int,
     val avgDurationMin: Double?,
+    /** Longest recorded duration and the encounter it came from — the tile taps through to it. */
+    val longestDuration: DurationExtreme?,
+    /** Shortest recorded duration and the encounter it came from. */
+    val shortestDuration: DurationExtreme?,
     val totalSelfOrgasms: Int,
     val totalPartnerOrgasms: Int,
     /** Average self-orgasms over encounters where a count was recorded. */
@@ -102,6 +117,8 @@ data class Insights(
             ratingHistogram = List(5) { 0 },
             totalDurationMin = 0,
             avgDurationMin = null,
+            longestDuration = null,
+            shortestDuration = null,
             totalSelfOrgasms = 0,
             totalPartnerOrgasms = 0,
             avgSelfOrgasms = null,
@@ -219,6 +236,19 @@ object InsightsEngine {
         val durations = encounters.mapNotNull { it.encounter.durationMin }
         val selfOrgasmCounts = encounters.mapNotNull { it.encounter.orgasmCountSelf }
 
+        // Longest/shortest duration, each keeping the encounter it came from so the Overview tile
+        // can navigate to that record. Ties resolve to the most recent encounter, which is the one
+        // a user is likelier to want to see when a figure was tied months apart — so the min end is
+        // a maxBy on (minutes, date), not a min: a plain min would pick the OLDEST of the tied
+        // shortest, which is the opposite of the intent. Encounters with no duration recorded are
+        // skipped, so a log where nobody filled in the field yields null and the tiles drop out
+        // rather than showing a fake 0.
+        val durationExtremes = encounters
+            .mapNotNull { e -> e.encounter.durationMin?.let { min -> DurationExtreme(min, e.encounter.id, dateOf(e)) } }
+        val longestDuration = durationExtremes.maxWithOrNull(compareBy({ it.minutes }, { it.date }))
+        val shortestDuration = durationExtremes
+            .maxWithOrNull(compareBy<DurationExtreme>({ -it.minutes }, { it.date }))
+
         val ratingHistogram = MutableList(5) { 0 }
         ratings.forEach { r -> if (r in 1..5) ratingHistogram[r - 1]++ }
 
@@ -308,6 +338,8 @@ object InsightsEngine {
             ratingHistogram = ratingHistogram,
             totalDurationMin = durations.sum(),
             avgDurationMin = durations.takeIf { it.isNotEmpty() }?.average(),
+            longestDuration = longestDuration,
+            shortestDuration = shortestDuration,
             totalSelfOrgasms = selfOrgasmCounts.sum(),
             totalPartnerOrgasms = totalPartnerOrgasms,
             avgSelfOrgasms = selfOrgasmCounts.takeIf { it.isNotEmpty() }?.average(),

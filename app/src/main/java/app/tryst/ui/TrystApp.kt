@@ -243,7 +243,10 @@ fun TrystApp() {
                         )
                     }
                     composable(Routes.INSIGHTS) {
-                        InsightsScreen(onOpenAchievements = { navController.navigate(Routes.ACHIEVEMENTS) })
+                        InsightsScreen(
+                            onOpenAchievements = { navController.navigate(Routes.ACHIEVEMENTS) },
+                            onOpenEncounter = { id -> navController.navigate(Routes.encounterEdit(id)) },
+                        )
                     }
                     composable(Routes.INSIGHTS_CUSTOMIZE) {
                         InsightsScreen(

@@ -137,34 +137,67 @@ fun VerticalBarChart(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Bottom,
             ) {
-                if (bucket.count > 0) {
-                    Text(
-                        bucket.count.toString(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                // Bars grow up from the baseline on first reveal.
-                val fraction = bucket.count.toFloat() / max * reveal
+                // The bar and its value label are stacked in one fixed-height track, anchored to
+                // the baseline. Keeping the label INSIDE the track (rather than as a sibling above
+                // it) is what makes the number ride its own bar: a label in a fixed slot would sit
+                // at the track's top edge for every bucket, i.e. all the numbers would line up on
+                // one horizontal line while the bars below them grew to different heights. Here the
+                // label is pushed up by exactly the bar's own height, so each value sits on its bar.
+                //
+                // The track exists because the original code used Modifier.weight(fraction) for
+                // bar height, which is the wrong tool: weight is a *flex* distribution, not a
+                // scaled length. It hands out whatever space is LEFT once the fixed-height
+                // children have taken theirs, split across all bars in proportion to their
+                // weights — with 12 monthly buckets the tallest bar landed near 14% of the
+                // available height and the chart read as a row of equal stubs. Scaling a length
+                // needs a fixed track + fillMaxHeight(fraction), the same shape RankedBars uses
+                // horizontally.
+                val trackHeight = 96.dp
+                val fraction = bucket.count.toFloat() / max
+                // A zero-count bucket keeps a ~1dp sliver so the axis reads as "present but
+                // empty" rather than missing; non-zero bars floor at 2% so a 1-vs-48 chart still
+                // shows the small one.
+                val barFraction = fraction.coerceAtLeast(if (bucket.count > 0) 0.02f else 0.004f) * reveal
                 Box(
                     modifier = Modifier
-                        .padding(top = 2.dp)
                         .fillMaxWidth(0.68f)
-                        .weight(fraction.coerceAtLeast(0.012f))
-                        .clip(RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp))
-                        .background(
-                            if (bucket.count > 0) {
-                                barBrush
-                            } else {
-                                Brush.verticalGradient(
-                                    listOf(
-                                        MaterialTheme.colorScheme.surfaceVariant,
-                                        MaterialTheme.colorScheme.surfaceVariant,
-                                    ),
-                                )
-                            },
-                        ),
-                )
+                        .height(trackHeight),
+                    contentAlignment = Alignment.BottomCenter,
+                ) {
+                    // Column: value label on top of the bar, both bottom-anchored → the pair
+                    // grows upward from the baseline as one unit.
+                    Column(
+                        modifier = Modifier.fillMaxWidth().fillMaxHeight(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Bottom,
+                    ) {
+                        if (bucket.count > 0) {
+                            Text(
+                                bucket.count.toString(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .fillMaxHeight(barFraction)
+                                .clip(RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp))
+                                .background(
+                                    if (bucket.count > 0) {
+                                        barBrush
+                                    } else {
+                                        Brush.verticalGradient(
+                                            listOf(
+                                                MaterialTheme.colorScheme.surfaceVariant,
+                                                MaterialTheme.colorScheme.surfaceVariant,
+                                            ),
+                                        )
+                                    },
+                                ),
+                        )
+                    }
+                }
                 Spacer(Modifier.height(4.dp))
                 Text(
                     bucket.label,
