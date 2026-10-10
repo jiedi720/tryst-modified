@@ -196,6 +196,7 @@ fun SettingsScreen(
     var pendingExportPassword by remember { mutableStateOf("") }
     var pendingExportIncludeSettings by remember { mutableStateOf(true) }
     var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
+    var showBackupPicker by remember { mutableStateOf(false) }
     val hasPresetPassword by backupViewModel.hasPresetPassword.collectAsStateWithLifecycle()
     val exportDirUri by backupViewModel.exportDirUri.collectAsStateWithLifecycle()
 
@@ -512,32 +513,19 @@ fun SettingsScreen(
                 enabled = !backupViewModel.busy,
                 onClick = {
                     backupViewModel.suppressAutoLock()
-                    // If no folder is set, or the provider rejects the intent outright, fall back to
-                    // a plain ACTION_OPEN_DOCUMENT with no seed.
-                    val intent = runCatching {
-                        android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT).apply {
+                    // Browse the saved export tree inside the app. EXTRA_INITIAL_URI is only a
+                    // hint and some document providers ignore it, reopening their last location.
+                    if (exportDirUri != null) {
+                        showBackupPicker = true
+                    } else {
+                        val intent = android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT).apply {
                             addCategory(android.content.Intent.CATEGORY_OPENABLE)
-                            // Accept any type: a .tryst file's MIME is provider-defined and often
-                            // octet-stream, so filtering would hide it in some pickers.
+                            // The backup MIME type is provider-defined, so don't filter by MIME.
                             type = "*/*"
                             addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            // Open where the backups actually are. EXTRA_INITIAL_URI wants the
-                            // tree's *document* uri, not the tree uri we stored.
-                            exportDirUri?.let { dir ->
-                                val doc = android.provider.DocumentsContract.buildDocumentUriUsingTree(
-                                    dir,
-                                    android.provider.DocumentsContract.getTreeDocumentId(dir),
-                                )
-                                putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI, doc)
-                            }
                         }
-                    }.getOrElse {
-                        android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT).apply {
-                            addCategory(android.content.Intent.CATEGORY_OPENABLE)
-                            type = "*/*"
-                        }
+                        openBackup.launch(intent)
                     }
-                    openBackup.launch(intent)
                 },
             )
             AnimatedVisibility(visible = backupViewModel.status != null) {
@@ -653,6 +641,30 @@ fun SettingsScreen(
                 }
             },
         )
+    }
+
+    if (showBackupPicker) {
+        exportDirUri?.let { dir ->
+            ExportFolderBackupPicker(
+                treeUri = dir,
+                onSelect = { uri ->
+                    showBackupPicker = false
+                    pendingImportUri = uri
+                    showImportPw = true
+                    backupViewModel.suppressAutoLock()
+                },
+                onBrowseOther = {
+                    showBackupPicker = false
+                    val intent = android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT).apply {
+                        addCategory(android.content.Intent.CATEGORY_OPENABLE)
+                        type = "*/*"
+                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    openBackup.launch(intent)
+                },
+                onDismiss = { showBackupPicker = false },
+            )
+        } ?: run { showBackupPicker = false }
     }
 
     if (showImportPw) {
