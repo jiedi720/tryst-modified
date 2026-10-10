@@ -14,6 +14,8 @@
 package app.tryst.ui.settings
 
 import android.net.Uri
+import android.provider.DocumentsContract
+import android.provider.DocumentsContract.Document
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -23,6 +25,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
@@ -35,6 +40,7 @@ import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.FolderOff
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
@@ -57,6 +63,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,6 +77,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.tryst.R
@@ -808,6 +817,117 @@ private fun BackupPasswordDialog(
             ) { Text(stringResource(R.string.action_ok)) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) } },
+    )
+}
+
+
+/**
+ * Lists documents from the persisted export tree rather than relying on ACTION_OPEN_DOCUMENT's
+ * EXTRA_INITIAL_URI hint (which many document providers ignore). Navigation stays inside the
+ * already-authorized SAF tree; selecting a file returns its document URI to the existing import
+ * and password flow.
+ */
+@Composable
+private fun ExportFolderBackupPicker(
+    treeUri: Uri,
+    onSelect: (Uri) -> Unit,
+    onBrowseOther: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    data class Entry(val id: String, val name: String, val isDirectory: Boolean)
+
+    val context = LocalContext.current
+    val rootId = remember(treeUri) { DocumentsContract.getTreeDocumentId(treeUri) }
+    var currentId by remember(treeUri) { mutableStateOf(rootId) }
+    var entries by remember(treeUri, currentId) { mutableStateOf<List<Entry>>(emptyList()) }
+    var loading by remember(treeUri, currentId) { mutableStateOf(true) }
+    var loadError by remember(treeUri, currentId) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(treeUri, currentId) {
+        loading = true
+        loadError = null
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
+                val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, currentId)
+                val rows = mutableListOf<Entry>()
+                context.contentResolver.query(
+                    childrenUri,
+                    arrayOf(Document.COLUMN_DOCUMENT_ID, Document.COLUMN_DISPLAY_NAME, Document.COLUMN_MIME_TYPE),
+                    null,
+                    null,
+                    "${Document.COLUMN_DISPLAY_NAME} ASC",
+                )?.use { cursor ->
+                    val idColumn = cursor.getColumnIndexOrThrow(Document.COLUMN_DOCUMENT_ID)
+                    val nameColumn = cursor.getColumnIndexOrThrow(Document.COLUMN_DISPLAY_NAME)
+                    val mimeColumn = cursor.getColumnIndexOrThrow(Document.COLUMN_MIME_TYPE)
+                    while (cursor.moveToNext()) {
+                        val id = cursor.getString(idColumn) ?: continue
+                        val name = cursor.getString(nameColumn) ?: id
+                        val mime = cursor.getString(mimeColumn)
+                        val isDirectory = mime == Document.MIME_TYPE_DIR
+                        // A provider may assign a generic MIME type to backups, so only exclude
+                        // folders from the file list; let the backup importer validate file content.
+                        rows += Entry(id, name, isDirectory)
+                    }
+                } ?: error("The selected folder could not be read.")
+                rows.sortedWith(compareBy<Entry> { !it.isDirectory }.thenBy { it.name.lowercase() })
+            }
+        }
+        result.onSuccess { entries = it }
+            .onFailure { loadError = it.message ?: "The selected folder could not be read." }
+        loading = false
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Import backup") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    if (currentId == rootId) "Export folder" else currentId.substringAfterLast('/'),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (currentId != rootId) {
+                    TextButton(onClick = {
+                        currentId = currentId.substringBeforeLast('/', rootId).ifBlank { rootId }
+                    }) { Text("← Parent folder") }
+                }
+                when {
+                    loading -> Text("Loading folder…")
+                    loadError != null -> Text(loadError!!, color = MaterialTheme.colorScheme.error)
+                    entries.isEmpty() -> Text("This folder is empty.")
+                    else -> LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                        items(entries, key = { it.id }) { entry ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, entry.id)
+                                        if (entry.isDirectory) currentId = entry.id else onSelect(uri)
+                                    }
+                                    .padding(vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                Icon(
+                                    if (entry.isDirectory) Icons.Filled.Folder else Icons.Filled.InsertDriveFile,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Text(entry.name, style = MaterialTheme.typography.bodyMedium)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onBrowseOther) { Text("Choose another location…") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
+        },
     )
 }
 
