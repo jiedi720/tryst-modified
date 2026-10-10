@@ -838,7 +838,8 @@ private fun ExportFolderBackupPicker(
 
     val context = LocalContext.current
     val rootId = remember(treeUri) { DocumentsContract.getTreeDocumentId(treeUri) }
-    var currentId by remember(treeUri) { mutableStateOf(rootId) }
+    var pathStack by remember(treeUri) { mutableStateOf(listOf(rootId)) }
+    val currentId = pathStack.last()
     var entries by remember(treeUri, currentId) { mutableStateOf<List<Entry>>(emptyList()) }
     var loading by remember(treeUri, currentId) { mutableStateOf(true) }
     var loadError by remember(treeUri, currentId) { mutableStateOf<String?>(null) }
@@ -889,9 +890,7 @@ private fun ExportFolderBackupPicker(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 if (currentId != rootId) {
-                    TextButton(onClick = {
-                        currentId = currentId.substringBeforeLast('/', rootId).ifBlank { rootId }
-                    }) { Text("← Parent folder") }
+                    TextButton(onClick = { pathStack = pathStack.dropLast(1) }) { Text("← Parent folder") }
                 }
                 when {
                     loading -> Text("Loading folder…")
@@ -904,7 +903,7 @@ private fun ExportFolderBackupPicker(
                                     .fillMaxWidth()
                                     .clickable {
                                         val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, entry.id)
-                                        if (entry.isDirectory) currentId = entry.id else onSelect(uri)
+                                        if (entry.isDirectory) pathStack = pathStack + entry.id else onSelect(uri)
                                     }
                                     .padding(vertical = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
